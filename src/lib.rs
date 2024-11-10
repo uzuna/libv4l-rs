@@ -87,6 +87,7 @@ pub mod framesize;
 pub mod memory;
 pub mod parameters;
 pub mod timestamp;
+pub mod util;
 pub mod video;
 
 pub mod io;
