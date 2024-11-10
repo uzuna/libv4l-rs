@@ -23,6 +23,7 @@ winit = "0.29"
 default = ["v4l2"]
 libv4l = ["v4l-sys"]
 v4l2 = ["v4l2-sys"]
+aligned-alloc = []
 
 [workspace]
 members = [

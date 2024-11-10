@@ -91,6 +91,9 @@ pub mod video;
 
 pub mod io;
 
+#[cfg(feature = "aligned-alloc")]
+pub mod aligned_alloc;
+
 pub use {
     capability::Capabilities,
     control::Control,

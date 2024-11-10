@@ -75,15 +75,32 @@ impl Arena {
         }
 
         // allocate the new user buffers
-        self.bufs.resize(v4l2_reqbufs.count as usize, Vec::new());
-        for i in 0..v4l2_reqbufs.count {
-            let buf = &mut self.bufs[i as usize];
-            unsafe {
-                buf.resize(v4l2_fmt.fmt.pix.sizeimage as usize, 0);
-            }
-        }
+        self.allocate_new_user_buffer(v4l2_reqbufs.count as usize, unsafe {
+            v4l2_fmt.fmt.pix.sizeimage as usize
+        });
 
         Ok(v4l2_reqbufs.count)
+    }
+
+    #[cfg(not(feature = "aligned-alloc"))]
+    fn allocate_new_user_buffer(&mut self, count: usize, size: usize) {
+        self.bufs.resize(count, Vec::new());
+        for i in 0..count {
+            let buf = &mut self.bufs[i];
+            buf.resize(size, 0);
+        }
+    }
+
+    // In certain environments, it is necessary to allocate memory aligned to the page size
+    //
+    // e.g. https://forums.developer.nvidia.com/t/jetson-orin-v4l2-memory-userptr-capture-fail/261393
+    #[cfg(feature = "aligned-alloc")]
+    fn allocate_new_user_buffer(&mut self, count: usize, size: usize) {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        self.bufs.resize(count, Vec::new());
+        for i in 0..count {
+            self.bufs[i] = crate::aligned_alloc::aligned_alloc(size, page_size);
+        }
     }
 
     pub fn release(&mut self) -> io::Result<()> {
