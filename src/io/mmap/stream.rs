@@ -2,10 +2,12 @@ use std::convert::TryInto;
 use std::time::Duration;
 use std::{io, mem, sync::Arc};
 
+use tokio::io::unix::AsyncFd;
+
 use crate::buffer::{Metadata, Type};
 use crate::device::{Device, Handle};
 use crate::io::mmap::arena::Arena;
-use crate::io::traits::{CaptureStream, OutputStream, Stream as StreamTrait};
+use crate::io::traits::{AsyncCaptureStream, CaptureStream, OutputStream, Stream as StreamTrait};
 use crate::memory::Memory;
 use crate::v4l2;
 use crate::v4l_sys::*;
@@ -85,6 +87,17 @@ impl<'a> Stream<'a> {
             type_: self.buf_type as u32,
             memory: Memory::Mmap as u32,
             ..unsafe { mem::zeroed() }
+        }
+    }
+
+    fn dequeue_buffer(&self, v4l2_buf: &mut v4l2_buffer) -> io::Result<usize> {
+        unsafe {
+            v4l2::ioctl(
+                self.handle.fd(),
+                v4l2::vidioc::VIDIOC_DQBUF,
+                v4l2_buf as *mut _ as *mut std::os::raw::c_void,
+            )?;
+            Ok(v4l2_buf.index as usize)
         }
     }
 }
@@ -284,6 +297,46 @@ impl<'a, 'b> OutputStream<'b> for Stream<'a> {
         // will always be valid.
         let bytes = &mut self.arena.bufs[self.arena_index];
         let meta = &mut self.buf_meta[self.arena_index];
+        Ok((bytes, meta))
+    }
+}
+
+impl<'a, 'b> AsyncCaptureStream<'b> for Stream<'a> {
+    async fn poll_dequeue(&mut self) -> io::Result<usize> {
+        let mut v4l2_buf = self.buffer_desc();
+        loop {
+            match self.dequeue_buffer(&mut v4l2_buf) {
+                Ok(index) => return Ok(index),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let fd = self.handle.fd();
+                    let async_fd = AsyncFd::new(fd)?;
+
+                    let _ = core::future::poll_fn(|cx| async_fd.poll_read_ready(cx)).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn poll_next(&'b mut self) -> io::Result<(&Self::Item, &Metadata)> {
+        if !self.active {
+            // Enqueue all buffers once on stream start
+            for index in 0..self.arena.bufs.len() {
+                <Self as CaptureStream>::queue(self, index)?;
+            }
+
+            self.start()?;
+        } else {
+            let index = self.arena_index;
+            <Self as CaptureStream>::queue(self, index)?;
+        }
+
+        self.arena_index = self.poll_dequeue().await?;
+
+        // The index used to access the buffer elements is given to us by v4l2, so we assume it
+        // will always be valid.
+        let bytes = &mut self.arena.bufs[self.arena_index];
+        let meta = &self.buf_meta[self.arena_index];
         Ok((bytes, meta))
     }
 }
