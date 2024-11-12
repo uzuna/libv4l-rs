@@ -87,6 +87,17 @@ impl Stream {
             ..unsafe { mem::zeroed() }
         }
     }
+
+    fn dequeue_buffer(&self, v4l2_buf: &mut v4l2_buffer) -> io::Result<usize> {
+        unsafe {
+            v4l2::ioctl(
+                self.handle.fd(),
+                v4l2::vidioc::VIDIOC_DQBUF,
+                v4l2_buf as *mut _ as *mut std::os::raw::c_void,
+            )?;
+            Ok(v4l2_buf.index as usize)
+        }
+    }
 }
 
 impl Drop for Stream {
@@ -164,6 +175,7 @@ impl<'a> CaptureStream<'a> for Stream {
     fn dequeue(&mut self) -> io::Result<usize> {
         let mut v4l2_buf = self.buffer_desc();
 
+        // ここで次のバッファを待っている。これをwakeにしたら非同期になる
         if self.handle.poll(libc::POLLIN, self.timeout.unwrap_or(-1))? == 0 {
             // This condition can only happen if there was a timeout.
             // A timeout is only possible if the `timeout` value is non-zero, meaning we should
@@ -171,13 +183,8 @@ impl<'a> CaptureStream<'a> for Stream {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "VIDIOC_DQBUF"));
         }
 
-        unsafe {
-            v4l2::ioctl(
-                self.handle.fd(),
-                v4l2::vidioc::VIDIOC_DQBUF,
-                &mut v4l2_buf as *mut _ as *mut std::os::raw::c_void,
-            )?;
-        }
+        // non_blockingなのでWouldBlockが返ってくる
+        self.dequeue_buffer(&mut v4l2_buf)?;
         self.arena_index = v4l2_buf.index as usize;
 
         self.buf_meta[self.arena_index] = Metadata {
@@ -204,6 +211,47 @@ impl<'a> CaptureStream<'a> for Stream {
         }
 
         self.arena_index = self.dequeue()?;
+
+        // The index used to access the buffer elements is given to us by v4l2, so we assume it
+        // will always be valid.
+        let bytes = &mut self.arena.bufs[self.arena_index];
+        let meta = &self.buf_meta[self.arena_index];
+        Ok((bytes, meta))
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl<'a> crate::io::traits::AsyncCaptureStream<'a> for Stream {
+    async fn poll_dequeue(&mut self) -> io::Result<usize> {
+        use tokio::io::unix::AsyncFd;
+        let mut v4l2_buf = self.buffer_desc();
+        loop {
+            match self.dequeue_buffer(&mut v4l2_buf) {
+                Ok(index) => return Ok(index),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let fd = self.handle.fd();
+                    let async_fd = AsyncFd::new(fd)?;
+
+                    let _ = core::future::poll_fn(|cx| async_fd.poll_read_ready(cx)).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn poll_next(&'a mut self) -> io::Result<(&Self::Item, &Metadata)> {
+        if !self.active {
+            // Enqueue all buffers once on stream start
+            for index in 0..self.arena.bufs.len() {
+                self.queue(index)?;
+            }
+
+            self.start()?;
+        } else {
+            self.queue(self.arena_index)?;
+        }
+
+        self.arena_index = self.poll_dequeue().await?;
 
         // The index used to access the buffer elements is given to us by v4l2, so we assume it
         // will always be valid.

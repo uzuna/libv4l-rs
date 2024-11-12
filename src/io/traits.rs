@@ -1,4 +1,4 @@
-use std::io;
+use std::{future::Future, io};
 
 use crate::buffer::Metadata;
 
@@ -35,4 +35,13 @@ pub trait OutputStream<'a>: Stream {
     /// Dump a new frame by first queueing and then dequeueing.
     /// First time initialization is performed if necessary.
     fn next(&'a mut self) -> io::Result<(&mut Self::Item, &mut Metadata)>;
+}
+
+pub trait AsyncCaptureStream<'a>: CaptureStream<'a> {
+    /// Remove a buffer from the drivers' outgoing queue
+    fn poll_dequeue(&mut self) -> impl Future<Output = io::Result<usize>>;
+
+    /// Fetch a new frame by first queueing and then dequeueing.
+    /// First time initialization is performed if necessary.
+    fn poll_next(&'a mut self) -> impl Future<Output = io::Result<(&Self::Item, &Metadata)>>;
 }
