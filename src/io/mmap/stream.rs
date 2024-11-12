@@ -2,12 +2,10 @@ use std::convert::TryInto;
 use std::time::Duration;
 use std::{io, mem, sync::Arc};
 
-use tokio::io::unix::AsyncFd;
-
 use crate::buffer::{Metadata, Type};
 use crate::device::{Device, Handle};
 use crate::io::mmap::arena::Arena;
-use crate::io::traits::{AsyncCaptureStream, CaptureStream, OutputStream, Stream as StreamTrait};
+use crate::io::traits::{CaptureStream, OutputStream, Stream as StreamTrait};
 use crate::memory::Memory;
 use crate::v4l2;
 use crate::v4l_sys::*;
@@ -180,13 +178,7 @@ impl<'a, 'b> CaptureStream<'b> for Stream<'a> {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "VIDIOC_DQBUF"));
         }
 
-        unsafe {
-            v4l2::ioctl(
-                self.handle.fd(),
-                v4l2::vidioc::VIDIOC_DQBUF,
-                &mut v4l2_buf as *mut _ as *mut std::os::raw::c_void,
-            )?;
-        }
+        self.dequeue_buffer(&mut v4l2_buf)?;
         self.arena_index = v4l2_buf.index as usize;
 
         self.buf_meta[self.arena_index] = Metadata {
@@ -259,13 +251,7 @@ impl<'a, 'b> OutputStream<'b> for Stream<'a> {
     fn dequeue(&mut self) -> io::Result<usize> {
         let mut v4l2_buf = self.buffer_desc();
 
-        unsafe {
-            v4l2::ioctl(
-                self.handle.fd(),
-                v4l2::vidioc::VIDIOC_DQBUF,
-                &mut v4l2_buf as *mut _ as *mut std::os::raw::c_void,
-            )?;
-        }
+        self.dequeue_buffer(&mut v4l2_buf)?;
         self.arena_index = v4l2_buf.index as usize;
 
         self.buf_meta[self.arena_index] = Metadata {
@@ -301,8 +287,10 @@ impl<'a, 'b> OutputStream<'b> for Stream<'a> {
     }
 }
 
-impl<'a, 'b> AsyncCaptureStream<'b> for Stream<'a> {
+#[cfg(feature = "tokio")]
+impl<'a, 'b> crate::io::traits::AsyncCaptureStream<'b> for Stream<'a> {
     async fn poll_dequeue(&mut self) -> io::Result<usize> {
+        use tokio::io::unix::AsyncFd;
         let mut v4l2_buf = self.buffer_desc();
         loop {
             match self.dequeue_buffer(&mut v4l2_buf) {

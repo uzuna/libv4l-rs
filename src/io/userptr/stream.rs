@@ -2,11 +2,9 @@ use std::convert::TryInto;
 use std::time::Duration;
 use std::{io, mem, sync::Arc};
 
-use tokio::io::unix::AsyncFd;
-
 use crate::buffer::{Metadata, Type};
 use crate::device::{Device, Handle};
-use crate::io::traits::{AsyncCaptureStream, CaptureStream, Stream as StreamTrait};
+use crate::io::traits::{CaptureStream, Stream as StreamTrait};
 use crate::io::userptr::arena::Arena;
 use crate::memory::Memory;
 use crate::v4l2;
@@ -186,13 +184,7 @@ impl<'a> CaptureStream<'a> for Stream {
         }
 
         // non_blockingなのでWouldBlockが返ってくる
-        unsafe {
-            v4l2::ioctl(
-                self.handle.fd(),
-                v4l2::vidioc::VIDIOC_DQBUF,
-                &mut v4l2_buf as *mut _ as *mut std::os::raw::c_void,
-            )?;
-        }
+        self.dequeue_buffer(&mut v4l2_buf)?;
         self.arena_index = v4l2_buf.index as usize;
 
         self.buf_meta[self.arena_index] = Metadata {
@@ -228,8 +220,10 @@ impl<'a> CaptureStream<'a> for Stream {
     }
 }
 
-impl<'a> AsyncCaptureStream<'a> for Stream {
+#[cfg(feature = "tokio")]
+impl<'a> crate::io::traits::AsyncCaptureStream<'a> for Stream {
     async fn poll_dequeue(&mut self) -> io::Result<usize> {
+        use tokio::io::unix::AsyncFd;
         let mut v4l2_buf = self.buffer_desc();
         loop {
             match self.dequeue_buffer(&mut v4l2_buf) {
