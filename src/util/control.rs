@@ -83,6 +83,16 @@ impl From<&str> for Value {
     }
 }
 
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Integer(i) => write!(f, "{}", i),
+            Value::Boolean(b) => write!(f, "{}", b),
+            Value::String(s) => write!(f, "{}", s),
+        }
+    }
+}
+
 /// 対象デバイスのControlに対して、設定可能な値やデフォルト値、idなどの情報を保持する構造体
 #[derive(Debug)]
 pub struct ControlDesc {
@@ -113,7 +123,26 @@ impl ControlDesc {
             }),
         }
     }
+
+    fn clamp(&self, value: &Value) -> Value {
+        match value {
+            Value::Integer(i) => {
+                if *i < self.minimum {
+                    Value::Integer(self.minimum)
+                } else if *i > self.maximum {
+                    Value::Integer(self.maximum)
+                } else {
+                    Value::Integer(*i)
+                }
+            }
+            Value::Boolean(b) => Value::Boolean(*b),
+            Value::String(s) => Value::String(s.clone()),
+        }
+    }
 }
+
+/// コントロールの値を文字列表示するための構造体
+pub struct ControlTexts(pub Vec<(String, Value)>);
 
 /// 対象デバイスのControlの情報を保持する構造体
 ///
@@ -225,11 +254,22 @@ impl ControlTable {
             if let Some(x) = self.map.get(r.name.as_str()) {
                 v.push(Control {
                     id: x.id,
-                    value: r.value.clone().into(),
+                    value: x.clamp(&r.value).into(),
                 });
             }
         }
         v
+    }
+
+    /// 設定値に基づいたControlのテキストを返す
+    pub fn text(&self, reqs: &Requests) -> ControlTexts {
+        let mut v = vec![];
+        for r in reqs.requests.iter() {
+            if let Some(x) = self.map.get(r.name.as_str()) {
+                v.push((r.name.clone(), x.clamp(&r.value)));
+            }
+        }
+        ControlTexts(v)
     }
 }
 
